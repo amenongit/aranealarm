@@ -1,0 +1,45 @@
+[
+
+{
+"ip" : "127.0.0.1",
+"name" : "localhost",
+"speech_name" : "localhost",
+"wait_dur" : 100,
+"geoloc" : {"lat" : -1.27, "lon": 3.5}
+},
+
+{
+"ip" : "162.0.217.254",
+"name" : "2ip.ua",
+"speech_name" : "2 i p dot u a",
+"wait_dur" : 500,
+"attempts" : 2,
+"geoloc" : {"lat" : 6.82, "lon": 12.1}
+},
+
+{
+"ip" : "151.101.2.219",
+"name" : "speedtest.net",
+"speech_name" : "speedtest dot net",
+"wait_dur" : 500,
+"geoloc" : {"lat" : 5.39, "lon": -6.2}
+},
+
+{
+"ip" : "1.1.1.1",
+"name" : "Cloudflare's DNS",
+"speech_name" : "Cloudflare's D.N.S.",
+"wait_dur" : 1000,
+"attempts" : 4,
+"geoloc" : {"lat" : -7.1, "lon": -5.82}
+},
+
+{
+"ip" : "8.8.8.8",
+"name" : "Google's DNS",
+"speech_name" : "D.N.S. of Google",
+"wait_dur" : 1000,
+"attempts" : 5
+}
+
+]

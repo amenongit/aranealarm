@@ -1,0 +1,7 @@
+{
+"ip" : ["ip_nodes_pass.json"],
+"place" : ["places.json"],
+"music" : ["song1.ogg", "song2.ogg"],
+"music_volume" : 20,
+"alarm_row_height" : 2
+}
