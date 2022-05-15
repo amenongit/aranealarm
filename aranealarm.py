@@ -66,7 +66,7 @@ import time
 
 
 APP_NAME = "Aranealarm"
-APP_VER = "v1.0.0 (2022.05.14)"
+APP_VER = "v1.0.2 (2022.05.15)"
 APP_COPYR_PART1 = "© 2022 Ame"
 APP_COPYR_PART2 = "▄▄▄"
 APP_COPYR_PART3 = "Non"
@@ -89,6 +89,7 @@ DEFAULT_GEOLOC = None
 DEFAULT_CHECKRATE = 1.0
 DEFAULT_FRAMERATE = 30.0
 DEFAULT_BLINKRATE = 4.0
+DEFAULT_IDLERATE = 100.0 # main loops idle for 1/idlerate seconds to avoid CPU overusage => overheat...
 
 DEFAULT_ALARM_ROW_HEIGHT = 2
 
@@ -379,10 +380,11 @@ class LogEntry:
 
 
 class Aranea:
-	def __init__(self, checkrate=DEFAULT_CHECKRATE, framerate=DEFAULT_FRAMERATE, blinkrate=DEFAULT_BLINKRATE):
+	def __init__(self, checkrate=DEFAULT_CHECKRATE, framerate=DEFAULT_FRAMERATE, blinkrate=DEFAULT_BLINKRATE, idlerate=DEFAULT_IDLERATE):
 		self.checkrate = checkrate
 		self.framerate = framerate
 		self.blinkrate = blinkrate
+		self.idlerate = idlerate
 
 		self.nodes = []
 		self.check_queue = Queue()
@@ -444,6 +446,7 @@ class Aranea:
 			if (not quit) and disconnects_num > 0:
 					speak_engine.say(f"{ALARM_SPEECH}: {disconnects_num} {DISCONNECTS_SPEECH if disconnects_num > 1 else DISCONNECT_SPEECH}")
 					speak_engine.runAndWait()
+			time.sleep(1.0 / self.idlerate)
 
 
 	def add_node(self, node):
@@ -461,7 +464,6 @@ class Aranea:
 			speech_name = node_descr.get("speech_name", DEFAULT_SPEECH_NAME)
 			wait_dur = node_descr.get("wait_dur", DEFAULT_WAIT_DUR)
 			attempts = node_descr.get("attempts", DEFAULT_ATTEMPTS)
-
 			geoloc = node_descr.get("geoloc", DEFAULT_GEOLOC)
 			if geoloc is not None:
 				geoloc = GeoLoc(geoloc.get("lat"), geoloc.get("lon"))
@@ -550,7 +552,6 @@ class Aranea:
 				self.voice_queue.put([VoiceQueueMessage.SPEAK, node.speech_name + " " + DISCONNECT_SPEECH])
 			node.update(connected, response_time)
 			self.unchecked_num -= 1
-
 		if self.unchecked_num == 0: # current check pass is finished
 			if self.log_needs_update:
 				self.pass_num += 1				
@@ -673,18 +674,15 @@ class Aranea:
 				pass
 
 		t = time.time()
-
 		if t - self.t_last_render > 1.0 / self.framerate:
 			curses.update_lines_cols()
 
 			node_col_width = min(NODE_COL_MAX_WIDTH, max([len(node.address) for node in self.nodes]) + ADDRESS_SEP_NODE_COL_WIDTH + max([len(node.name) for node in self.nodes]))
-
 			responsetime_col_start = NODE_COL_START + node_col_width + 1
 			connected_col_start = responsetime_col_start + RESPONSETIME_COL_WIDTH + 1
 			duration_col_start = connected_col_start + CONNECTED_COL_WIDTH + 1
 			issues_col_start = duration_col_start + DURATION_COL_WIDTH + 1
 			history_col_start = issues_col_start + ISSUES_COL_WIDTH + 1
-
 			self.page_size = min(len(self.nodes), curses.LINES // 3)
 
 			scr.erase()
@@ -1010,6 +1008,8 @@ class Aranea:
 				self.change_music_volume(-1)
 			elif ch == curses.KEY_RIGHT:
 				self.change_music_volume(1)
+
+			time.sleep(1.0 / self.idlerate)
 
 		self.finish_music()
 
