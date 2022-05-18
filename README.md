@@ -31,7 +31,7 @@ You should see something like this:
 
 ![demo](vis/aranealarm_demo.gif)
 
-Control keys are described at the bottom, use them to e.g. switch from lat-lon map to log of recent passes or suppress alarm voice unless the set of disconnected nodes changes.
+Control keys are described at the bottom, use them to e.g. switch from lat-lon map to log of recent passes or add interval between alarm voice messages.
 
 Of course, being a diagnostic tool, Aranealarm only _informs_ you about connection issues and cannot _amend_ them; that is up to something or someone else.
 

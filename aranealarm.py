@@ -66,7 +66,7 @@ import time
 
 
 APP_NAME = "Aranealarm"
-APP_VER = "v1.0.2 (2022.05.15)"
+APP_VER = "v1.0.4 (2022.05.18)"
 APP_COPYR_PART1 = "© 2022 Ame"
 APP_COPYR_PART2 = "▄▄▄"
 APP_COPYR_PART3 = "Non"
@@ -91,19 +91,23 @@ DEFAULT_FRAMERATE = 30.0
 DEFAULT_BLINKRATE = 4.0
 DEFAULT_IDLERATE = 100.0 # main loops idle for 1/idlerate seconds to avoid CPU overusage => overheat...
 
-DEFAULT_ALARM_ROW_HEIGHT = 2
+HUSH_INTERVAL_STEP = 10
+DEFAULT_HUSH_INTERVAL = 3 * HUSH_INTERVAL_STEP
+
+DEFAULT_ALARM_ROW_HEIGHT = 2 # must be >= 2
 
 ALARM_CAPTION = "A L A R M"
 QUIET_CAPTION = "Q U I E T"
 DISCONNECT_CAPTION = "disconnect"
 DISCONNECTS_CAPTION = "disconnects"
-HUSHED_CAPTION = "HUSHED"
+DURATION_CAPTION = "LASTS FOR"
+HUSHED_CAPTION = "HUSH"
 
 ALARM_SPEECH = "Alarm"
 DISCONNECT_SPEECH = "disconnect"
 DISCONNECTS_SPEECH = "disconnects"
 
-DEFAULT_MUSIC_VOLUME = 50
+DEFAULT_MUSIC_VOLUME = 20
 
 NUMBER_HEADER = "Num"
 NUMBER_COL_START = 1
@@ -189,6 +193,7 @@ else:
 class VoiceQueueMessage(Enum):
 	DISCONNECTS_NUM = auto()
 	SPEAK = auto()
+	HUSH = auto()
 	QUIT = auto()
 
 
@@ -207,13 +212,15 @@ class GeoLoc:
 	def to_str(self):
 		ns = "N" if self.lat >=0 else "S"
 		lat_abs = math.fabs(self.lat)
-		lat_g = int(math.floor(lat_abs))
-		lat_m = int(math.floor(60.0 * (lat_abs - lat_g)))
+		lat_d = int(math.floor(lat_abs))
+		lat_m = int(math.floor(60.0 * (lat_abs - lat_d)))
+		lat_s = int(math.floor(3600.0 * (lat_abs - lat_d - lat_m / 60.0)))
 		ew = "E" if self.lon >=0 else "W"
 		lon_abs = math.fabs(self.lon)
-		lon_g = int(math.floor(lon_abs))
-		lon_m = int(math.floor(60.0 * (lon_abs - lon_g)))
-		return f"{lat_g}°{lat_m}′{ns}, {lon_g}°{lon_m}′{ew}"
+		lon_d = int(math.floor(lon_abs))
+		lon_m = int(math.floor(60.0 * (lon_abs - lon_d)))
+		lon_s = int(math.floor(3600.0 * (lon_abs - lon_d - lon_m / 60.0)))
+		return f"{lat_d}°{lat_m}′{lat_s}″{ns}|{lon_d}°{lon_m}′{lon_s}″{ew}"
 
 
 class Place:
@@ -392,7 +399,9 @@ class Aranea:
 		self.unchecked_num = 0
 		self.last_disconnects = 0 # alarm if > 0
 		self.last_disconn_nodes_set = set()
-		self.hushed_disconn_nodes_set = set()
+		self.t_last_alarm_state_change = 0
+		self.hushed = False
+		self.hush_interval = DEFAULT_HUSH_INTERVAL
 		self.pass_num = 0
 
 		self.voice_queue = Queue()
@@ -409,7 +418,7 @@ class Aranea:
 		
 		self.t_last_render = 0.0
 
-		self.alarm_row_height = DEFAULT_ALARM_ROW_HEIGHT
+		self.alarm_row_height = max(2, DEFAULT_ALARM_ROW_HEIGHT)
 		self.alarm_blink = False
 		self.t_last_alarm_blink = False
 
@@ -427,25 +436,33 @@ class Aranea:
 
 
 	def voice_thread(self):
-		disconnects_num = 0
 		speak_engine = pyttsx3.init()
+		disconnects_num = 0
+		t_last_speech = 0
+		speech_interval = 0
 		quit = False
 		while not quit:
 			while not self.voice_queue.empty():
 				msg = self.voice_queue.get()
 				if msg[0] == VoiceQueueMessage.DISCONNECTS_NUM:
 					disconnects_num = msg[1]
+					t_last_speech = 0
 					if disconnects_num == 0:
 						speak_engine.stop()
 				elif msg[0] == VoiceQueueMessage.SPEAK:
 					speak_engine.say(msg[1])
+					t_last_speech = 0
+				elif msg[0] == VoiceQueueMessage.HUSH:
+					speech_interval = msg[1]
 				elif msg[0] == VoiceQueueMessage.QUIT:
 					quit = True
 				else:
 					raise SystemError("Unknown message: \"" + str(msg) + "\"")
-			if (not quit) and disconnects_num > 0:
+			t = time.time()
+			if (not quit) and (disconnects_num > 0) and (t - t_last_speech > speech_interval):
 					speak_engine.say(f"{ALARM_SPEECH}: {disconnects_num} {DISCONNECTS_SPEECH if disconnects_num > 1 else DISCONNECT_SPEECH}")
 					speak_engine.runAndWait()
+					t_last_speech = t
 			time.sleep(1.0 / self.idlerate)
 
 
@@ -503,9 +520,9 @@ class Aranea:
 		if music_filepaths_descr is not None:
 			for fp in music_filepaths_descr:
 				self.music_filepaths.append(fp)
-		self.music_volume = config_descr.get("music_volume", DEFAULT_MUSIC_VOLUME)
+		self.music_volume = max(0, min(100, config_descr.get("music_volume", DEFAULT_MUSIC_VOLUME)))
 
-		self.alarm_row_height = config_descr.get("alarm_row_height", DEFAULT_ALARM_ROW_HEIGHT)
+		self.alarm_row_height = max(2, config_descr.get("alarm_row_height", DEFAULT_ALARM_ROW_HEIGHT))
 
 
 	def disconnects(self):
@@ -528,36 +545,23 @@ class Aranea:
 		return s
 
 
-	def alarm_if_disconnects_change(self, force_update=False):
-		disconn_nodes_set = self.disconn_nodes_set()
-		if force_update or (disconn_nodes_set != self.last_disconn_nodes_set): # change
-			self.last_disconn_nodes_set = disconn_nodes_set.copy()
-			self.last_disconnects = len(self.last_disconn_nodes_set)
-			self.hushed_disconn_nodes_set.clear()
-			self.voice_queue.put([VoiceQueueMessage.DISCONNECTS_NUM, self.last_disconnects])
-			if len(self.music_filepaths) > 0:
-				if self.last_disconnects > 0:
-					self.music_paused = True
-					pygame.mixer.music.pause()
-				else:
-					self.music_paused = False
-					pygame.mixer.music.unpause()
+	def has_music(self):
+		return len(self.music_filepaths) > 0
 
 
 	def sync_check(self):
 		while not self.check_queue.empty():
 			i, connected, response_time = self.check_queue.get()
-			node = self.nodes[i]
-			if node.connected and (not connected):
-				self.voice_queue.put([VoiceQueueMessage.SPEAK, node.speech_name + " " + DISCONNECT_SPEECH])
-			node.update(connected, response_time)
+			self.nodes[i].update(connected, response_time)
 			self.unchecked_num -= 1
+		for node in self.nodes:
+			node.update_peak_durations()	
 		if self.unchecked_num == 0: # current check pass is finished
 			if self.log_needs_update:
-				self.pass_num += 1				
+				self.pass_num += 1
 				self.update_log()
 			t = time.time()
-			if t - self.t_last_check > 1.0 / self.checkrate:
+			if t - self.t_last_check > 1.0 / self.checkrate: # start next check pass
 				self.t_last_check = t
 				self.unchecked_num = len(self.nodes)
 				self.log_needs_update = True
@@ -565,18 +569,41 @@ class Aranea:
 					Thread(target=node.checker, args=(i, self.check_queue), name=f"thrPing{1+i}", daemon=True).start() # daemonized to avoid waiting until ping ends after exit (what about resource leaks?)
 
 
-	def update_peak_durations(self):
-		for node in self.nodes:
-			node.update_peak_durations()
+	def sync_alarm(self):
+		disconn_nodes_set = self.disconn_nodes_set()
+		if disconn_nodes_set != self.last_disconn_nodes_set: # change
+			new_disconn_set = disconn_nodes_set - self.last_disconn_nodes_set # may be empty
+			for i in new_disconn_set:
+				self.voice_queue.put([VoiceQueueMessage.SPEAK, self.nodes[i].speech_name + " " + DISCONNECT_SPEECH])
+			self.last_disconn_nodes_set = disconn_nodes_set.copy()
+			disconnects = len(disconn_nodes_set)
+			if (self.last_disconnects > 0) != (disconnects > 0):
+				self.t_last_alarm_state_change = int(time.time())
+			self.last_disconnects = disconnects
+			self.voice_queue.put([VoiceQueueMessage.DISCONNECTS_NUM, self.last_disconnects])
+			if self.has_music():
+				if self.last_disconnects > 0:
+					if not self.music_paused:
+						self.music_paused = True
+						pygame.mixer.music.pause()
+				else:
+					if self.music_paused:
+						self.music_paused = False
+						pygame.mixer.music.unpause()
 
 
-	def hush(self):
-		self.hushed_disconn_nodes_set = self.disconn_nodes_set()
-		self.voice_queue.put([VoiceQueueMessage.DISCONNECTS_NUM, 0]) # force voice to stop
+	def set_hush(self, hushed, duration=None):
+		self.hushed = hushed
+		if duration is not None:
+			self.hush_interval = duration
+		if self.hushed:
+			self.voice_queue.put([VoiceQueueMessage.HUSH, self.hush_interval])
+		else:
+			self.voice_queue.put([VoiceQueueMessage.HUSH, 0])
 
 
 	def sync_music(self, force_next=False):
-		if len(self.music_filepaths) > 0:
+		if self.has_music():
 			if force_next or ((not self.music_paused) and (not pygame.mixer.music.get_busy())): # current music ended (or no music has been started yet)
 				if self.music_current >= 0:
 					if force_next:
@@ -591,16 +618,16 @@ class Aranea:
 
 
 	def finish_music(self):
-		if len(self.music_filepaths) > 0:
+		if self.has_music():
 			pygame.mixer.music.stop()
 			pygame.mixer.music.unload()
 			pygame.mixer.quit()
-			pygame.quit()
+			# pygame.quit()
 
 
 	def change_music_volume(self, delta):
 		self.music_volume = max(0, min(100, self.music_volume + delta))
-		if len(self.music_filepaths) > 0:
+		if self.has_music():
 			pygame.mixer.music.set_volume(self.music_volume / 100)
 
 
@@ -645,8 +672,7 @@ class Aranea:
 				if entry.disconnects > 0:
 					s += " (" + str(entry.disconn_nodes).replace(" ", "")[1:-1] + ")"
 				s += f", response time Min {entry.resptime_stats[0]}, Avg {entry.resptime_stats[1]}, Max {entry.resptime_stats[2]}, StdDev {entry.resptime_stats[3]}"
-				s += "\n"
-				log_file.write(s)
+				log_file.write(s + "\n")
 			else:
 				break
 			i += 1
@@ -661,8 +687,8 @@ class Aranea:
 
 
 	def geoloc_to_scr_yx(self, geoloc, min_y):
-		y = max(min_y, min(curses.LINES - 4, curses.LINES - 4 - int((geoloc.lat - self.map_min_lat) / max(1e-16, self.map_max_lat - self.map_min_lat) * (curses.LINES - 4 - min_y))))
-		x = max(1, min(curses.COLS - 2, 1 + int((geoloc.lon - self.map_min_lon) / max(1e-16, self.map_max_lon - self.map_min_lon) * (curses.COLS - 3))))
+		y = max(min_y, min(curses.LINES - 4, curses.LINES - 4 - int(round( (geoloc.lat - self.map_min_lat) * (curses.LINES - 4 - min_y) / max(1e-16, self.map_max_lat - self.map_min_lat) ))))
+		x = max(1, min(curses.COLS - 2, 1 + int(round( (geoloc.lon - self.map_min_lon) * (curses.COLS - 3) / max(1e-16, self.map_max_lon - self.map_min_lon) ))))
 		return y, x
 
 
@@ -775,27 +801,33 @@ class Aranea:
 			# Alarm
 			alarm_row = (1 + self.alarm_row_height) >> 1
 			if self.last_disconnects > 0:
-				fg, bg = (CCLR_YELLOW, CCLR_DARKRED) if self.alarm_blink else (CCLR_DARKRED, CCLR_YELLOW)
-				draw_fillrect(scr, 1, 1, self.alarm_row_height, curses.COLS - 2, ccp(bg))
-				caddstr(alarm_row, (curses.COLS - len(ALARM_CAPTION)) >> 1, ALARM_CAPTION, ccp(fg, bg))
-				if self.alarm_row_height > 1:
-					alarm_disconnects_caption = f"{self.last_disconnects} {DISCONNECTS_CAPTION if self.last_disconnects > 1 else DISCONNECT_CAPTION}"
-					caddstr(alarm_row + 1, (curses.COLS - len(alarm_disconnects_caption)) >> 1, alarm_disconnects_caption, ccp(fg, bg))
-				if len(self.hushed_disconn_nodes_set) > 0:
-					caddstr(alarm_row, 1, HUSHED_CAPTION, ccp(fg, bg))
-					caddstr(alarm_row, curses.COLS - 1 - len(HUSHED_CAPTION), HUSHED_CAPTION, ccp(fg, bg))
+				alarm_fg, alarm_bg = (CCLR_YELLOW, CCLR_DARKRED) if self.alarm_blink else (CCLR_DARKRED, CCLR_YELLOW)
+				draw_fillrect(scr, 1, 1, self.alarm_row_height, curses.COLS - 2, ccp(alarm_bg))
+				caddstr(alarm_row, (curses.COLS - len(ALARM_CAPTION)) >> 1, ALARM_CAPTION, ccp(alarm_fg, alarm_bg))
+				alarm_disconnects_caption = f"{self.last_disconnects} {DISCONNECTS_CAPTION if self.last_disconnects > 1 else DISCONNECT_CAPTION}"
+				caddstr(alarm_row + 1, (curses.COLS - len(alarm_disconnects_caption)) >> 1, alarm_disconnects_caption, ccp(alarm_fg, alarm_bg))
 				if t - self.t_last_alarm_blink > 1.0 / self.blinkrate:
 					self.alarm_blink = not self.alarm_blink
 					self.t_last_alarm_blink = t
 			else:
-				fg, bg = (CCLR_GREEN, CCLR_DARKGREEN)
-				draw_fillrect(scr, 1, 1, self.alarm_row_height, curses.COLS - 2, ccp(bg))
-				caddstr(alarm_row, (curses.COLS - len(QUIET_CAPTION)) >> 1, QUIET_CAPTION, ccp(fg, bg))
-				if self.alarm_row_height > 1:
-					if len(self.music_filepaths) > 0:
-						music_filename = self.music_filepaths[self.music_current].split(sep="/")[-1]
-						quiet_music_caption = f"♪ {music_filename} ♪"
-						caddstr(alarm_row + 1, (curses.COLS - len(quiet_music_caption)) >> 1, quiet_music_caption, ccp(fg, bg))
+				alarm_fg, alarm_bg = (CCLR_GREEN, CCLR_DARKGREEN)
+				draw_fillrect(scr, 1, 1, self.alarm_row_height, curses.COLS - 2, ccp(alarm_bg))
+				caddstr(alarm_row, (curses.COLS - len(QUIET_CAPTION)) >> 1, QUIET_CAPTION, ccp(alarm_fg, alarm_bg))
+				if self.has_music():
+					music_filename = self.music_filepaths[self.music_current].split(sep="/")[-1]
+					music_caption = f"♪ {music_filename} ♪"
+					caddstr(alarm_row + 1, (curses.COLS - len(music_caption)) >> 1, music_caption, ccp(alarm_fg, alarm_bg))
+			# Duration
+			duration = int(t) - self.t_last_alarm_state_change
+			hours, secs = duration // 3600, duration % 3600
+			mins, secs = secs // 60, secs % 60
+			caddstr(alarm_row, 1, DURATION_CAPTION, ccp(alarm_fg, alarm_bg))
+			caddstr(alarm_row + 1, 1, f"{hours:03}:{mins:02}:{secs:02}", ccp(alarm_fg, alarm_bg))
+			# Hush
+			if self.hushed:
+				caddstr(alarm_row, curses.COLS - 1 - len(HUSHED_CAPTION), HUSHED_CAPTION, ccp(alarm_fg, alarm_bg))
+				hush_interval_caption = f"{self.hush_interval} s"
+				caddstr(alarm_row + 1, curses.COLS - 1 - len(hush_interval_caption), hush_interval_caption, ccp(alarm_fg, alarm_bg))
 
 			# Headers
 			headers_color = ccp(CCLR_GRAY)
@@ -813,16 +845,16 @@ class Aranea:
 
 			# Nodes
 			for i, node in enumerate(self.nodes[self.page_start:min(len(self.nodes), self.page_start + self.page_size)]):
-				hush_attr = curses.A_REVERSE if i in self.hushed_disconn_nodes_set else 0
+				rev_attr = curses.A_REVERSE if not node.connected else 0 # should be more eye-catching
 
 				color_bright = ccp(CCLR_GREEN) if node.connected else ccp(CCLR_RED)
 				color_dark = ccp(CCLR_DARKGREEN) if node.connected else ccp(CCLR_DARKRED)
 				# Number
-				caddstr(nodes_top_row + i, NUMBER_COL_START, f"{self.page_start + i + 1:03}", color_dark | hush_attr)
+				caddstr(nodes_top_row + i, NUMBER_COL_START, f"{self.page_start + i + 1:03}", color_dark | rev_attr)
 				# Address
-				caddstr(nodes_top_row + i, NODE_COL_START, node.address, color_dark | hush_attr)
+				caddstr(nodes_top_row + i, NODE_COL_START, node.address, color_dark | rev_attr)
 				# Name
-				caddstr(nodes_top_row + i, max(0, NODE_COL_START + node_col_width - len(node.name)), node.name, color_bright | hush_attr)
+				caddstr(nodes_top_row + i, max(0, NODE_COL_START + node_col_width - len(node.name)), node.name, color_bright | rev_attr)
 				if len(node.address) + len(node.name) < node_col_width:
 					draw_fillrect(scr, nodes_top_row + i, NODE_COL_START + len(node.address), nodes_top_row + i, NODE_COL_START + node_col_width - len(node.name) - 1, ccp(CCLR_DARKGRAY), "·")
 				# Response time or its peak
@@ -834,7 +866,7 @@ class Aranea:
 					if node.connected and (node.response_time is not None):
 						caddstr(nodes_top_row + i, responsetime_col_start, f"{node.response_time:5}", resptime_cp)
 				# Connected?
-				caddstr(nodes_top_row + i, connected_col_start, YES_CAPTION if node.connected else NO_CAPTION, color_bright | hush_attr)
+				caddstr(nodes_top_row + i, connected_col_start, YES_CAPTION if node.connected else NO_CAPTION, color_bright | rev_attr)
 				# Duration of current (dis)connection or its peaks
 				if self.show_peaks == ShowPeaksMode.NONE:
 					duration = int(t) - node.t_last_change
@@ -916,28 +948,38 @@ class Aranea:
 			# Help
 			help_bright_cp = ccp(CCLR_GRAY)
 			help_dark_cp = ccp(CCLR_DARKGRAY)
-			caddstr(curses.LINES - 2, 1, "Q", help_bright_cp)
-			caddstr(":Quit ", help_dark_cp)
+			caddstr(curses.LINES - 2, 1, "|", help_dark_cp)
+			caddstr("Q", help_bright_cp)
+			caddstr("uit|", help_dark_cp)
+	
 			caddstr("↑/↓/PgUp/PgDown/Home/End", help_bright_cp)
-			caddstr(":scroll nodes ", help_dark_cp)
+			caddstr(":scroll nodes|", help_dark_cp)
+	
+			caddstr("time ", help_dark_cp)
 			caddstr("P", help_bright_cp)
-			caddstr(":time Peaks ", help_dark_cp)
-			caddstr("M", help_bright_cp)
-			caddstr(":Map <-> log ", help_dark_cp)
+			caddstr("eaks|", help_dark_cp)
 
-			caddstr(curses.LINES - 1, 1, "D", help_bright_cp)
-			caddstr(":history Distribution ", help_dark_cp)
+			caddstr("history ", help_dark_cp)
+			caddstr("D", help_bright_cp)
+			caddstr("istribution|", help_dark_cp)
+
+			caddstr(curses.LINES - 1, 1, "|", help_dark_cp)
+			caddstr("M", help_bright_cp)
+			caddstr("ap <-> log|", help_dark_cp)
+
+			caddstr("save ", help_dark_cp)
 			caddstr("L", help_bright_cp)
-			caddstr(":save Log ", help_dark_cp)
+			caddstr("og|", help_dark_cp)
+
 			caddstr("H", help_bright_cp)
-			caddstr(":Hush ", help_dark_cp)
-			caddstr("U", help_bright_cp)
-			caddstr(":Unhush ", help_dark_cp)
-			if len(self.music_filepaths) > 0:
+			caddstr("ush (", help_dark_cp)
+			caddstr("1-9", help_bright_cp)
+			caddstr(":interval)|", help_dark_cp)
+			if self.has_music():
 				caddstr("N", help_bright_cp)
-				caddstr(":Next music ", help_dark_cp)
+				caddstr("ext music|", help_dark_cp)
 				caddstr("←/→", help_bright_cp)
-				caddstr(f":music vol ({self.music_volume:03})", help_dark_cp)
+				caddstr(f":music volume ({self.music_volume:03})|", help_dark_cp)
 
 			# Version & copyright
 			caddstr(curses.LINES - 2, curses.COLS - 1 - len(APP_VER), APP_VER, ccp(CCLR_DARKGRAY))
@@ -955,18 +997,19 @@ class Aranea:
 
 		Thread(target=self.voice_thread, name="thrVoice", daemon=True).start() # daemonized to avoid waiting until speech ends after exit (what about resource leaks?)
 
+		self.t_last_alarm_state_change = int(time.time())
+
 		init_screen(scr)
 
-		if len(self.music_filepaths) > 0:
+		if self.has_music():
 			# pygame.init()
 			pygame.mixer.init()
 
 		quit = False
 		while not quit:
 			self.render(scr)
-			self.alarm_if_disconnects_change()
 			self.sync_check()
-			self.update_peak_durations()
+			self.sync_alarm()
 			self.sync_music()
 
 			ch = scr.getch()
@@ -992,16 +1035,16 @@ class Aranea:
 					ShowPeaksMode.CONN : ShowPeaksMode.DISCONN,
 					ShowPeaksMode.DISCONN : ShowPeaksMode.NONE
 				}[self.show_peaks]
-			elif ch in [ord('m'), ord('M')]:
-				self.show_map = not self.show_map
 			elif ch in [ord('d'), ord('D')]:
 				self.show_history_distribution = not self.show_history_distribution
+			elif ch in [ord('m'), ord('M')]:
+				self.show_map = not self.show_map			
 			elif ch in [ord('l'), ord('L')]:
 				self.save_log(DEFAULT_LOG_FILENAME)
 			elif ch in [ord('h'), ord('H')]:
-				self.hush()
-			elif ch in [ord('u'), ord('U')]:
-				self.alarm_if_disconnects_change(True)
+				self.set_hush(not self.hushed)
+			elif (ch >= ord('1')) and (ch <= ord('9')):
+				self.set_hush(self.hushed, (1 + ch - ord('1')) * HUSH_INTERVAL_STEP)
 			elif ch in [ord('n'), ord('N')]:
 				self.sync_music(True)
 			elif ch == curses.KEY_LEFT:
