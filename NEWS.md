@@ -1,3 +1,15 @@
+Version 1.0.6 (2022.05.22)
+--------------------------
+
+* Added scrolling of log and history to see beyond what fits into one screen
+
+* Added statistics of response time: mean (μ) and standard deviation (σ)
+
+* Added 9 response data slots and 3 types of such data for IP nodes: TTL and derived hops (guess), OS (guess)
+
+* Minor changes
+
+
 Version 1.0.4 (2022.05.18)
 --------------------------
 
