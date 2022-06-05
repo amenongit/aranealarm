@@ -53,6 +53,7 @@ except ImportError:
 	print("Aranealarm requires \"curses\" module for TUI, which on Windows, in turn, requires \"windows-curses\" module.\nInstall it, e.g. \"pip install [--user] windows-curses\"")
 	exit(1)
 
+
 import datetime
 from enum import Enum, auto
 import json
@@ -66,7 +67,7 @@ import time
 
 
 APP_NAME = "Aranealarm"
-APP_VER = "v1.0.6 (2022.05.22)"
+APP_VER = "v1.0.8 (2022.06.05)"
 APP_LINK = "github.com/amenongit/aranealarm"
 APP_COPYR_PART1 = "© 2022 Ame"
 APP_COPYR_PART2 = "▄▄▄"
@@ -122,11 +123,12 @@ NODE_HEADER = "Node"
 NODE_COL_START = NUMBER_COL_START + NUMBER_COL_WIDTH + 1
 NODE_COL_MAX_WIDTH = 48
 
-RESPONSETIME_HEADER = "RespTime"
-RESPONSETIME_AVG_HEADER = "μRspTime"
-RESPONSETIME_STDDEV_HEADER = "σRspTime"
-RESPONSEDATA_HEADER = "RespDat"
-RESPONSE_COL_WIDTH = 8
+RESPONSETIME_HEADER = " RespTime"
+RESPONSETIME_DELTA_HEADER = "ΔRespTime"
+RESPONSETIME_AVG_HEADER = "μRespTime"
+RESPONSETIME_STDDEV_HEADER = "σRespTime"
+RESPONSEDATA_HEADER = "RespData"
+RESPONSE_COL_WIDTH = 9
 
 CONNECTED_HEADER = "Conn"
 CONNECTED_COL_WIDTH = 4
@@ -205,6 +207,7 @@ class VoiceQueueMsg(Enum):
 
 class RespTimeStatsMode(Enum):
 	NONE = auto()
+	DELTA = auto()
 	MAX = auto()
 	AVG = auto()
 	STDDEV = auto()
@@ -227,11 +230,13 @@ class GeoLoc:
 		lat_d = int(math.floor(lat_abs))
 		lat_m = int(math.floor(60.0 * (lat_abs - lat_d)))
 		lat_s = int(math.floor(3600.0 * (lat_abs - lat_d - lat_m / 60.0)))
+
 		ew = "E" if self.lon >=0 else "W"
 		lon_abs = math.fabs(self.lon)
 		lon_d = int(math.floor(lon_abs))
 		lon_m = int(math.floor(60.0 * (lon_abs - lon_d)))
 		lon_s = int(math.floor(3600.0 * (lon_abs - lon_d - lon_m / 60.0)))
+
 		return f"{lat_d}°{lat_m}′{lat_s}″{ns}|{lon_d}°{lon_m}′{lon_s}″{ew}"
 
 
@@ -317,6 +322,7 @@ class Node:
 
 		self.connected = True
 		self.response_time = None # in milliseconds
+		self.prev_response_time = None
 		self.peak_response_time = -1
 		self.response_times_sum = 0.0
 		self.response_times_sqr_sum = 0.0
@@ -343,6 +349,7 @@ class Node:
 		
 	def update_conn(self, connected, response_time, datas):
 		if connected:
+			self.prev_response_time = self.response_time
 			self.response_time = response_time
 			self.peak_response_time = max(self.peak_response_time, self.response_time)
 			self.response_times_sum += self.response_time
@@ -411,6 +418,7 @@ class IPNode(Node):
 
 		connected = False
 		response_time = None
+
 		ttl_data = None
 		hops_data = None
 		os_data = None
@@ -437,6 +445,7 @@ class IPNode(Node):
 						os_data = ["OS", ttl2os(ttl)]
 						break
 				break
+
 		if response_time is None:
 			response_time = int(1000 * (time.time() - t_start)) # less accurate due to call overhead
 
@@ -468,19 +477,24 @@ class Aranea:
 		self.last_disconnects = 0 # alarm if > 0
 		self.last_disconn_nodes_set = set()
 		self.t_last_alarm_state_change = 0
+
 		self.hushed = False
 		self.hush_interval = DEFAULT_HUSH_INTERVAL
-		self.pass_num = 0
 
 		self.voice_queue = Queue()
 
+		self.pass_num = 0
 		self.log = [None] * LOG_SIZE # ring buffer
 		self.log_pos = 0
 		self.log_needs_update = False
-
 		self.log_row_start = 0
 
+		self.longest_response_time = -1
+		self.last_respondents = set()
+		self.last_last_respondents = set()
+
 		self.behind = 0
+		self.fast_past_scroll = False
 
 		self.page_start = 0
 		self.page_size = 1
@@ -488,6 +502,7 @@ class Aranea:
 		self.response_data = 0 # 0 is time, 1-9 are data
 		self.resptime_stats_mode = RespTimeStatsMode.NONE
 		self.duration_stats_mode = DurationStatsMode.NONE
+
 		self.show_history_distribution = False
 		
 		self.t_last_render = 0.0
@@ -505,6 +520,7 @@ class Aranea:
 		self.music_current = -1
 		self.music_volume = DEFAULT_MUSIC_VOLUME
 		self.music_paused = False
+		self.music_shuffle = True
 
 
 	def voice_thread(self):
@@ -628,6 +644,13 @@ class Aranea:
 			i, connected, response_time, datas = self.check_queue.get()
 			self.nodes[i].update_conn(connected, response_time, datas)
 			self.unchecked_num -= 1
+			if connected:
+				if response_time > self.longest_response_time:
+					self.longest_response_time = response_time
+					self.last_respondents.clear()
+					self.last_respondents.add(i)
+				elif response_time == self.longest_response_time:
+					self.last_respondents.add(i)
 
 		for node in self.nodes:
 			node.update_peak_durations()
@@ -640,12 +663,15 @@ class Aranea:
 					node.update_history_pos()
 				if self.behind > 0:
 					self.behind += 1
+				self.last_last_respondents = self.last_respondents.copy()
 				
 			t = time.time()
 			if t - self.t_last_check > 1.0 / self.checkrate: # start next check pass
 				self.t_last_check = t
 				self.unchecked_num = len(self.nodes)
 				self.log_needs_update = True
+				self.longest_response_time = -1
+				self.last_respondents.clear()
 				for i, node in enumerate(self.nodes):
 					Thread(target=node.checker, args=(i, self.check_queue), name=f"thrPing{1+i}", daemon=True).start() # daemonized to avoid waiting until ping ends after exit (what about resource leaks?)
 
@@ -690,10 +716,19 @@ class Aranea:
 					if force_next:
 						pygame.mixer.music.stop()
 					pygame.mixer.music.unload()
-				self.music_current = random.randrange(len(self.music_filepaths))
-				pygame.mixer.music.load(self.music_filepaths[self.music_current])
+				if self.music_shuffle:
+					self.music_current = random.randrange(len(self.music_filepaths))
+				else:
+					self.music_current = (self.music_current + 1) % len(self.music_filepaths) if self.music_current >= 0 else 0
+				try:
+					pygame.mixer.music.load(self.music_filepaths[self.music_current])
+				except:
+					pass
 				pygame.mixer.music.set_volume(self.music_volume / 100)
-				pygame.mixer.music.play()
+				try:
+					pygame.mixer.music.play()
+				except:
+					pass
 				if self.music_paused:
 					pygame.mixer.music.pause()
 
@@ -792,8 +827,8 @@ class Aranea:
 			# Borders
 			bcp = ccp(CCLR_GRAY, CCLR_BLACK)
 
-			caddstr(0, 0, "┌", bcp)
-			caddstr(0, curses.COLS - 1, "┐", bcp)
+			caddstr(0, 0, "╭", bcp)
+			caddstr(0, curses.COLS - 1, "╮", bcp)
 			draw_hline(scr, 0, 1, curses.COLS - 2, bcp)
 
 			title_col_start = (curses.COLS - len(APP_NAME) - 2) >> 1
@@ -837,7 +872,7 @@ class Aranea:
 
 			caddstr(headers_row - 1, curses.COLS - 1, "┤", bcp)
 			draw_vline(scr, curses.COLS - 1, headers_row, headers_row, bcp)
-			caddstr(headers_row + 1, curses.COLS - 1, "┤" if self.show_history_distribution else "┘", bcp)
+			caddstr(headers_row + 1, curses.COLS - 1, "┤" if self.show_history_distribution else "╯", bcp)
 
 			nodes_top_row = headers_row + 2
 
@@ -855,7 +890,7 @@ class Aranea:
 
 			caddstr(bottom_border_row, 0, "├", bcp)
 			draw_hline(scr, bottom_border_row, 1, curses.COLS - 1, bcp)
-			caddstr(bottom_border_row, curses.COLS - 1, "┤" if self.show_history_distribution else "┐", bcp)
+			caddstr(bottom_border_row, curses.COLS - 1, "┤" if self.show_history_distribution else "╮", bcp)
 
 			caddstr(bottom_border_row, NODE_COL_START - 1, "┴", bcp)
 			caddstr(bottom_border_row, response_col_start - 1, "┴", bcp)
@@ -864,12 +899,12 @@ class Aranea:
 			caddstr(bottom_border_row, issues_col_start - 1, "┴", bcp)
 			caddstr(bottom_border_row, history_col_start - 1, "┴", bcp)
 
-			draw_vline(scr, 0, bottom_border_row + 1, curses.LINES - 1, bcp)
+			draw_vline(scr, 0, bottom_border_row + 1, curses.LINES - HELP_ROW_HEIGHT - 2, bcp)
 			draw_vline(scr, curses.COLS - 1, bottom_border_row + 1, curses.LINES - HELP_ROW_HEIGHT - 2, bcp)
 
-			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, 0, "├", bcp)
-			draw_hline(scr, curses.LINES - HELP_ROW_HEIGHT - 1, 1, curses.COLS - 1, bcp)
-			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, curses.COLS - 1, "┘", bcp)
+			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, 0, "╰", bcp)
+			draw_hline(scr, curses.LINES - HELP_ROW_HEIGHT - 1, 1, curses.COLS - 2, bcp)
+			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, curses.COLS - 1, "╯", bcp)
 
 			# Title
 			caddstr(0, title_col_start, " " + APP_NAME + " ", ccp(CCLR_BLACK, CCLR_WHITE))
@@ -893,7 +928,7 @@ class Aranea:
 					music_filename = self.music_filepaths[self.music_current].split(sep="/")[-1]
 					music_caption = f"♪ {music_filename} ♪"
 					caddstr(alarm_row + 1, (curses.COLS - len(music_caption)) >> 1, music_caption, ccp(alarm_fg, alarm_bg))
-			# Duration
+			# Alarm duration
 			duration = int(t) - self.t_last_alarm_state_change
 			hours, secs = duration // 3600, duration % 3600
 			mins, secs = secs // 60, secs % 60
@@ -915,9 +950,10 @@ class Aranea:
 			else:
 				caddstr(headers_row, response_col_start, {
 						RespTimeStatsMode.NONE : RESPONSETIME_HEADER,
-						RespTimeStatsMode.MAX : RESPONSETIME_HEADER.upper(),
+						RespTimeStatsMode.DELTA : RESPONSETIME_DELTA_HEADER,
 						RespTimeStatsMode.AVG : RESPONSETIME_AVG_HEADER,
-						RespTimeStatsMode.STDDEV: RESPONSETIME_STDDEV_HEADER
+						RespTimeStatsMode.STDDEV: RESPONSETIME_STDDEV_HEADER,
+						RespTimeStatsMode.MAX : RESPONSETIME_HEADER.upper()
 					}[self.resptime_stats_mode],
 					headers_cp
 				)
@@ -936,18 +972,17 @@ class Aranea:
 			for i, node in enumerate(self.nodes[self.page_start:min(len(self.nodes), self.page_start + self.page_size)]):
 				row = nodes_top_row + i
 				rev_attr = curses.A_REVERSE if not node.connected else 0 # should be more eye-catching
-
 				node_back_color = CCLR_BLACK if node.connected else CCLR_YELLOW
 				node_cp_bright = ccp(CCLR_GREEN, node_back_color) if node.connected else ccp(CCLR_RED, node_back_color)
 				node_cp_dark = ccp(CCLR_DARKGREEN, node_back_color) if node.connected else ccp(CCLR_DARKRED, node_back_color)
 				# Number
-				caddstr(row, NUMBER_COL_START, f"{self.page_start + i + 1:03}", node_cp_dark | rev_attr)
+				caddstr(row, NUMBER_COL_START, f"{self.page_start + i + 1:0{NUMBER_COL_WIDTH}}", node_cp_dark | rev_attr)
 				# Address
 				caddstr(row, NODE_COL_START, node.address, node_cp_dark | rev_attr)
 				# Name
 				caddstr(row, max(0, NODE_COL_START + node_col_width - len(node.name)), node.name, node_cp_bright | rev_attr)
-				if len(node.address) + len(node.name) < node_col_width:
-					draw_fillrect(scr, row, NODE_COL_START + len(node.address), row, NODE_COL_START + node_col_width - len(node.name) - 1, ccp(CCLR_DARKGRAY), "·")
+				if len(node.address) + len(node.name) + 2 < node_col_width:
+					draw_fillrect(scr, row, NODE_COL_START + len(node.address) + 1, row, NODE_COL_START + node_col_width - len(node.name) - 2, ccp(CCLR_DARKGRAY), "ˑ") # other fillers: "˒", "˗", "┈", "╴", "·", "▸", "-"
 				# Response data: 0 - time or its peak or its average or its stddev, 1-9 - other data
 				if self.response_data > 0:
 					respdata_cp = ccp(CCLR_DARKGRAY)
@@ -959,20 +994,36 @@ class Aranea:
 				else:
 					resptime_cp = ccp(CCLR_BLUE)
 					resptime_str = None
+					monotonicity_char = None
 					if self.resptime_stats_mode == RespTimeStatsMode.NONE:
 						if node.connected and (node.response_time is not None):
-							resptime_str = f"{node.response_time:{RESPONSE_COL_WIDTH}}"							
-					elif self.resptime_stats_mode == RespTimeStatsMode.MAX:
-						if node.peak_response_time >= 0:
-							resptime_str = f"{node.peak_response_time:{RESPONSE_COL_WIDTH}}"
+							resptime_str = f"{node.response_time}"
+							if node.prev_response_time is not None:
+								monotonicity_char = "►" if node.response_time > node.prev_response_time else ("◊" if node.response_time == node.prev_response_time else "◄") # or "▲", "▼"
+							else:
+								monotonicity_char = " "
+					elif self.resptime_stats_mode == RespTimeStatsMode.DELTA:
+						if node.connected and (node.response_time is not None) and (node.prev_response_time is not None):
+							delta = node.response_time - node.prev_response_time
+							resptime_str = "0" if delta == 0 else f"{delta:+}"
 					elif self.resptime_stats_mode == RespTimeStatsMode.AVG:
 						if node.response_times_num > 0:
-							resptime_str = f"{int(round(node.resptime_average())):{RESPONSE_COL_WIDTH}}"
+							resptime_str = f"{int(round(node.resptime_average()))}"
 					elif self.resptime_stats_mode == RespTimeStatsMode.STDDEV:
 						if node.response_times_num > 1:
-							resptime_str = f"{int(round(node.resptime_stddev())):{RESPONSE_COL_WIDTH}}"
+							resptime_str = f"{int(round(node.resptime_stddev()))}"
+					elif self.resptime_stats_mode == RespTimeStatsMode.MAX:
+						if node.peak_response_time >= 0:
+							resptime_str = f"{node.peak_response_time}"
 					if resptime_str is not None:
-						caddstr(row, response_col_start, resptime_str, resptime_cp)
+						monoton_indent = 0
+						if monotonicity_char is not None:
+							caddstr(row, response_col_start, monotonicity_char, ccp(CCLR_DARKBLUE) |
+								(curses.A_REVERSE if (i in self.last_last_respondents) else 0))
+							monoton_indent += 2
+						if len(resptime_str) + 1 + monoton_indent < RESPONSE_COL_WIDTH:
+							draw_fillrect(scr, row, response_col_start + monoton_indent, row, response_col_start + RESPONSE_COL_WIDTH - len(resptime_str) - 2, ccp(CCLR_DARKGRAY), "ˑ")
+						caddstr(row, response_col_start + RESPONSE_COL_WIDTH - len(resptime_str), resptime_str, resptime_cp)
 				# Connected?
 				caddstr(row, connected_col_start, YES_CAPTION if node.connected else NO_CAPTION, node_cp_bright | rev_attr)
 				# Duration of current (dis)connection or its peaks
@@ -1056,14 +1107,17 @@ class Aranea:
 			# Help
 			help_bright_cp = ccp(CCLR_GRAY)
 			help_dark_cp = ccp(CCLR_DARKGRAY)
-			caddstr(curses.LINES - HELP_ROW_HEIGHT + 0, 1, "|", help_dark_cp)
+			caddstr(curses.LINES - HELP_ROW_HEIGHT + 0, 0, "|", help_dark_cp)
 			caddstr("↑/↓/PgUp/PgDown/Home/End", help_bright_cp)
 			caddstr(":scroll nodes|", help_dark_cp)
 
-			caddstr("Shift+PgDown/PgUp/Home", help_bright_cp)
-			caddstr(":scroll log & history|", help_dark_cp)
+			caddstr("Shift+PgUp/PgDown/Home/End", help_bright_cp)
+			caddstr(":scroll log & history (", help_dark_cp)
 
-			caddstr(curses.LINES - HELP_ROW_HEIGHT + 1, 1, "|", help_dark_cp)
+			caddstr("F", help_bright_cp)
+			caddstr("ast " + ("√" if self.fast_past_scroll else "×") + ")|", help_dark_cp) # Terminal does not display "✓", "✗"...
+
+			caddstr(curses.LINES - HELP_ROW_HEIGHT + 1, 0, "|", help_dark_cp)
 			caddstr("0/1-9", help_bright_cp)
 			caddstr(":response time/data|", help_dark_cp)
 	
@@ -1077,10 +1131,13 @@ class Aranea:
 			caddstr("D", help_bright_cp)
 			caddstr("istribution|", help_dark_cp)
 
-			caddstr(curses.LINES - HELP_ROW_HEIGHT + 2, 1, "|", help_dark_cp)
+			caddstr("</>", help_bright_cp)
+			caddstr(":prev/next disconnect|", help_dark_cp)
+
+			caddstr(curses.LINES - HELP_ROW_HEIGHT + 2, 0, "|", help_dark_cp)
 			caddstr("Q", help_bright_cp)
 			caddstr("uit|", help_dark_cp)
-	
+
 			caddstr("M", help_bright_cp)
 			caddstr("ap <-> log|", help_dark_cp)
 
@@ -1091,11 +1148,14 @@ class Aranea:
 			caddstr("ush (", help_dark_cp)
 			caddstr("[/]/{/}", help_bright_cp)
 			caddstr(":interval)|", help_dark_cp)
+
 			if self.has_music():
 				caddstr("N", help_bright_cp)
-				caddstr("ext music|", help_dark_cp)
+				caddstr("ext music (", help_dark_cp)
+				caddstr("S", help_bright_cp)
+				caddstr("huffle " + ("√" if self.music_shuffle else "×") + ")|", help_dark_cp)
 				caddstr("←/→", help_bright_cp)
-				caddstr(f":music volume ({self.music_volume:03})|", help_dark_cp)
+				caddstr(f":music volume {self.music_volume:03}|", help_dark_cp)
 
 			# Version & link & copyright
 			caddstr(curses.LINES - HELP_ROW_HEIGHT + 0, curses.COLS - 1 - len(APP_VER), APP_VER, ccp(CCLR_DARKGRAY))
@@ -1132,10 +1192,7 @@ class Aranea:
 			ch = scr.getch()
 
 			# Process input
-			if ch in [ord('q'), ord('Q')]:
-				self.voice_queue.put([VoiceQueueMsg.QUIT])
-				quit = True
-			elif ch == curses.KEY_UP:
+			if ch == curses.KEY_UP:
 				self.page_start = max(0, self.page_start - 1)
 			elif ch == curses.KEY_DOWN:
 				self.page_start = max(0, min(len(self.nodes) - self.page_size, self.page_start + 1))
@@ -1148,31 +1205,53 @@ class Aranea:
 			elif ch == curses.KEY_END:
 				self.page_start = max(0, len(self.nodes) - self.page_size)
 			elif ch == curses.KEY_SPREVIOUS:
-				self.behind = max(0, self.behind - max(0, curses.LINES - HELP_ROW_HEIGHT - self.log_row_start - 2))
+				for _ in range(10 if self.fast_past_scroll else 1):
+					self.behind = max(0, self.behind - max(0, curses.LINES - HELP_ROW_HEIGHT - self.log_row_start - 2))
 			elif ch == curses.KEY_SNEXT:
-				behind = self.behind + max(0, curses.LINES - HELP_ROW_HEIGHT - self.log_row_start - 2)
-				if self.log[(self.log_pos - behind - 1) & LOG_SIZE_BINMASK] is not None:
-					self.behind = behind
+				for _ in range(10 if self.fast_past_scroll else 1):
+					behind = self.behind + max(0, curses.LINES - HELP_ROW_HEIGHT - self.log_row_start - 2)
+					if self.log[(self.log_pos - behind - 1) & LOG_SIZE_BINMASK] is not None:
+						self.behind = behind
 			elif ch == curses.KEY_SHOME:
 				self.behind = 0
+			elif ch == curses.KEY_SEND:
+				self.behind = max(0, self.log_pos - 1) & LOG_SIZE_BINMASK # doesn't handle wrap properly
+			elif ch in [ord('f'), ord('F')]:
+				self.fast_past_scroll = not self.fast_past_scroll
 			elif ch == ord('0'):
 				self.response_data = 0
 			elif (ch >= ord('1')) and (ch <= ord('9')):
 				self.response_data = 1 + ch - ord('1')
 			elif ch in [ord('r'), ord('R')]:
 				self.response_data = 0
-				self.resptime_stats_mode = { RespTimeStatsMode.NONE : RespTimeStatsMode.MAX,
-					RespTimeStatsMode.MAX : RespTimeStatsMode.AVG,
+				self.resptime_stats_mode = { RespTimeStatsMode.NONE : RespTimeStatsMode.DELTA,
+					RespTimeStatsMode.DELTA : RespTimeStatsMode.AVG,
 					RespTimeStatsMode.AVG : RespTimeStatsMode.STDDEV,
-					RespTimeStatsMode.STDDEV : RespTimeStatsMode.NONE
+					RespTimeStatsMode.STDDEV : RespTimeStatsMode.MAX,
+					RespTimeStatsMode.MAX : RespTimeStatsMode.NONE
 				}[self.resptime_stats_mode]
 			elif ch in [ord('l'), ord('L')]:
 				self.duration_stats_mode = { DurationStatsMode.NONE : DurationStatsMode.CONN_MAX,
 					DurationStatsMode.CONN_MAX : DurationStatsMode.DISCONN_MAX,
 					DurationStatsMode.DISCONN_MAX : DurationStatsMode.NONE
-				}[self.duration_stats_mode]	
+				}[self.duration_stats_mode]
 			elif ch in [ord('d'), ord('D')]:
 				self.show_history_distribution = not self.show_history_distribution
+			elif ch == ord('<'):
+				new_page_start = self.page_start - 1
+				while (new_page_start >= 0) and self.nodes[new_page_start].connected:
+					new_page_start -= 1
+				if new_page_start >= 0:
+					self.page_start = new_page_start
+			elif ch == ord('>'):
+				new_page_start = self.page_start + 1
+				while (new_page_start < len(self.nodes)) and self.nodes[new_page_start].connected:
+					new_page_start += 1
+				if new_page_start < len(self.nodes):
+					self.page_start = max(0, min(len(self.nodes) - self.page_size, new_page_start))
+			elif ch in [ord('q'), ord('Q')]:
+				self.voice_queue.put([VoiceQueueMsg.QUIT])
+				quit = True
 			elif ch in [ord('m'), ord('M')]:
 				self.show_map = not self.show_map			
 			elif ch in [ord('w'), ord('W')]:
@@ -1189,10 +1268,16 @@ class Aranea:
 				self.set_hush(True, self.hush_interval + 10)
 			elif ch in [ord('n'), ord('N')]:
 				self.sync_music(True)
+			elif ch in [ord('s'), ord('S')]:
+				self.music_shuffle = not self.music_shuffle
 			elif ch == curses.KEY_LEFT:
 				self.change_music_volume(-1)
 			elif ch == curses.KEY_RIGHT:
 				self.change_music_volume(1)
+			elif ch == curses.KEY_SLEFT:
+				self.change_music_volume(-10)
+			elif ch == curses.KEY_SRIGHT:
+				self.change_music_volume(10)	
 
 			time.sleep(1.0 / self.idlerate)
 

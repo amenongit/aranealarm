@@ -1,3 +1,15 @@
+Version 1.0.8 (2022.06.05)
+--------------------------
+
+* Added moving to previous/next disconnected node, to navigate quicker when the entire list of nodes is large enough
+
+* Added "fast" scrolling of the past and jumping to first pass
+
+* More response time statistics: difference, and its sign, between current and previous passes
+
+* Minor alterations
+
+
 Version 1.0.6 (2022.05.22)
 --------------------------
 

@@ -18,7 +18,7 @@
 },
 
 {
-"ip" : "151.0.0.0",
+"ip" : "151.0.255.0",
 "name" : "speedtest.net (wrong IP)",
 "speech_name" : "Wrong speedtest dot net",
 "wait_dur" : 500,
