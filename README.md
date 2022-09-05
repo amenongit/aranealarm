@@ -13,7 +13,25 @@ $ pip[3] install -U pygame
 > pip install -U windows-curses
 ```
 
-In case of a network disconnected from Internet, that is, where Internet is restricted or downright prohibited, prepared beforehand platform-specific Python installer and wheel files should suffice. With dependencies of the ones above, for instance, on Windows, these are `comtypes`, `pip`, `pygame`, `pypiwin32`, `pyttsx3`, `pywin32`, `setuptools`, `windows_curses`. Having downloaded `pyttsx3-2.90-py3-none-any.whl` and the like with `> pip download pyttsx3` where Internet is present, bring them to the monitoring computer and do `> pip install pyttsx3-2.90-py3-none-any.whl`, following the dependency order.
+In case of a network disconnected from Internet, that is, where Internet is restricted or downright prohibited, prepared beforehand platform-specific Python installer and wheel files should suffice. With dependencies of the ones above, for instance, on Windows, these wheels are
+
+* `comtypes`
+
+* `pip`
+
+* `pygame`
+
+* `pypiwin32`
+
+* `pyttsx3`
+
+* `pywin32`
+
+* `setuptools`
+
+* `windows_curses`
+
+Having downloaded `pyttsx3-2.90-py3-none-any.whl` and the rest with `> pip download pyttsx3` (or `$ pip[3] download --platform win32 --python-version 3.8 windows-curses` for environment different from where you run `pip`) where Internet is present, bring them to the monitoring computer, install Python with `pip`, and do `> pip install pyttsx3-2.90-py3-none-any.whl` etc., following the dependency order.
 
 ## Usage
 

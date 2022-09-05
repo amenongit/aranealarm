@@ -1,11 +1,13 @@
 {
 "ip" : ["ip_nodes_pass.json"],
 "place" : ["places.json"],
+"checkrate" : 0.25,
+"stdout_codepage" : "cp866",
 "alarm_row_height" : 2,
 "hush_interval" : 30,
 "music" : [
 	"song1.ogg",
 	"song2.ogg"
 ],
-"music_volume" : 20
+"music_volume" : 16
 }

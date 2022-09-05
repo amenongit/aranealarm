@@ -1,4 +1,4 @@
-"""
+﻿"""
 Aranealarm
 
 An exercise in basic network monitoring (_aranea_ is "spider[web]" in Latin) and TUI,
@@ -67,7 +67,7 @@ import time
 
 
 APP_NAME = "Aranealarm"
-APP_VER = "v1.0.8 (2022.06.05)"
+APP_VER = "v1.0.10 (2022.09.05)"
 APP_LINK = "github.com/amenongit/aranealarm"
 APP_COPYR_PART1 = "© 2022 Ame"
 APP_COPYR_PART2 = "▄▄▄"
@@ -88,7 +88,9 @@ DEFAULT_WAIT_DUR = 500
 DEFAULT_ATTEMPTS = 4
 DEFAULT_GEOLOC = None
 
-DEFAULT_CHECKRATE = 1.0
+DEFAULT_STDOUT_CODEPAGE = "cp866"
+
+DEFAULT_CHECKRATE = 0.25
 DEFAULT_FRAMERATE = 30.0
 DEFAULT_BLINKRATE = 4.0
 DEFAULT_IDLERATE = 100.0 # main loops idle for 1/idlerate seconds to avoid CPU overusage => overheat...
@@ -109,7 +111,8 @@ ALARM_SPEECH = "Alarm"
 DISCONNECT_SPEECH = "disconnect"
 DISCONNECTS_SPEECH = "disconnects"
 
-DEFAULT_MUSIC_VOLUME = 20
+DEFAULT_MUSIC_VOLUME = 16
+MAX_MUSIC_VOLUME = 128
 
 NUMBER_HEADER = "Num"
 NUMBER_COL_START = 1
@@ -208,6 +211,7 @@ class VoiceQueueMsg(Enum):
 class RespTimeStatsMode(Enum):
 	NONE = auto()
 	DELTA = auto()
+	MIN = auto()
 	MAX = auto()
 	AVG = auto()
 	STDDEV = auto()
@@ -323,7 +327,8 @@ class Node:
 		self.connected = True
 		self.response_time = None # in milliseconds
 		self.prev_response_time = None
-		self.peak_response_time = -1
+		self.max_response_time = -1
+		self.min_response_time = 0xFFFFFFFF
 		self.response_times_sum = 0.0
 		self.response_times_sqr_sum = 0.0
 		self.response_times_num = 0
@@ -351,7 +356,8 @@ class Node:
 		if connected:
 			self.prev_response_time = self.response_time
 			self.response_time = response_time
-			self.peak_response_time = max(self.peak_response_time, self.response_time)
+			self.max_response_time = max(self.max_response_time, self.response_time)
+			self.min_response_time = min(self.min_response_time, self.response_time)
 			self.response_times_sum += self.response_time
 			self.response_times_sqr_sum += self.response_time * self.response_time
 			self.response_times_num += 1
@@ -405,8 +411,9 @@ class Node:
 
 
 class IPNode(Node):
-	def __init__(self, ip=DEFAULT_IP, name=DEFAULT_NAME, speech_name=DEFAULT_SPEECH_NAME, wait_dur=DEFAULT_WAIT_DUR, attempts=DEFAULT_ATTEMPTS, geoloc=DEFAULT_GEOLOC):
+	def __init__(self, ip=DEFAULT_IP, name=DEFAULT_NAME, speech_name=DEFAULT_SPEECH_NAME, wait_dur=DEFAULT_WAIT_DUR, attempts=DEFAULT_ATTEMPTS, geoloc=DEFAULT_GEOLOC, stdout_codepage=DEFAULT_STDOUT_CODEPAGE):
 		super().__init__(ip, name, speech_name, wait_dur, attempts, geoloc)
+		self.stdout_codepage = stdout_codepage
 
 
 	def checker(self, index, msg_queue): # runs in a separate thread
@@ -426,12 +433,20 @@ class IPNode(Node):
 		t_start = time.time()
 		for _ in range(self.attempts):
 			ping_run = subprocess.run(ping_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			connected = (ping_run.returncode == 0) and (b"unreachable" not in ping_run.stdout)
+			connected = (ping_run.returncode == 0) and (b"unreachable" not in ping_run.stdout) and ("недостижим".encode("cp866") not in ping_run.stdout)
 			if connected:
-				ping_out_str_split = ping_run.stdout.decode("cp437").split()
+				ping_out_str_split = ping_run.stdout.decode(self.stdout_codepage).split()
 				for s in ping_out_str_split:
+					time_value_str = None
+
 					if s.startswith("time=") or s.startswith("time<"):
-						time_value_str = s[5:-2].strip() # Linux: "time=12.3 ms" -> "12.3"; Windows: "time=12ms" -> "12" <> or "time<1ms" -> "1"; MacOS: ???
+						time_value_str = s[5:-2].strip() # Linux: "time=12.3 ms" -> "12.3"; Windows: "time=12ms" -> "12" or "time<1ms" -> "1"; MacOS: ???
+					elif s.startswith("время=") or s.startswith("время<"):
+						time_value_str = s[6:-2].strip()
+					elif s.startswith("час=") or s.startswith("час<"):
+						time_value_str = s[4:-2].strip()
+
+					if time_value_str is not None:
 						try:
 							response_time = int(round(float(time_value_str)))
 						except ValueError:
@@ -469,6 +484,8 @@ class Aranea:
 		self.framerate = framerate
 		self.blinkrate = blinkrate
 		self.idlerate = idlerate
+		
+		self.stdout_codepage = DEFAULT_STDOUT_CODEPAGE
 
 		self.nodes = []
 		self.check_queue = Queue()
@@ -573,7 +590,7 @@ class Aranea:
 			if geoloc is not None:
 				geoloc = GeoLoc(geoloc.get("lat"), geoloc.get("lon"))
 
-			self.add_node(IPNode(ip, name, speech_name, wait_dur, attempts, geoloc))
+			self.add_node(IPNode(ip, name, speech_name, wait_dur, attempts, geoloc, self.stdout_codepage))
 
 
 	def load_places(self, filepath):
@@ -594,6 +611,10 @@ class Aranea:
 		config_descr = json.load(config_file)
 		config_file.close()
 
+		self.checkrate = config_descr.get("checkrate", DEFAULT_CHECKRATE)
+
+		self.stdout_codepage = config_descr.get("stdout_codepage", DEFAULT_STDOUT_CODEPAGE)
+		
 		ip_nodeslists = config_descr.get("ip", None)
 		if ip_nodeslists is not None:
 			for fp in ip_nodeslists:
@@ -602,8 +623,8 @@ class Aranea:
 		placeslists = config_descr.get("place", None)
 		if placeslists is not None:
 			for fp in placeslists:
-				self.load_places(fp)
-
+				self.load_places(fp)	
+				
 		self.alarm_row_height = max(2, config_descr.get("alarm_row_height", DEFAULT_ALARM_ROW_HEIGHT))
 
 		self.hush_interval = max(1, config_descr.get("hush_interval", DEFAULT_HUSH_INTERVAL))
@@ -612,7 +633,7 @@ class Aranea:
 		if music_filepaths_descr is not None:
 			for fp in music_filepaths_descr:
 				self.music_filepaths.append(fp)
-		self.music_volume = max(0, min(100, config_descr.get("music_volume", DEFAULT_MUSIC_VOLUME)))		
+		self.music_volume = max(0, min(MAX_MUSIC_VOLUME, config_descr.get("music_volume", DEFAULT_MUSIC_VOLUME)))		
 
 
 	def disconnects(self):
@@ -724,7 +745,7 @@ class Aranea:
 					pygame.mixer.music.load(self.music_filepaths[self.music_current])
 				except:
 					pass
-				pygame.mixer.music.set_volume(self.music_volume / 100)
+				pygame.mixer.music.set_volume(self.music_volume / MAX_MUSIC_VOLUME)
 				try:
 					pygame.mixer.music.play()
 				except:
@@ -742,9 +763,9 @@ class Aranea:
 
 
 	def change_music_volume(self, delta):
-		self.music_volume = max(0, min(100, self.music_volume + delta))
+		self.music_volume = max(0, min(MAX_MUSIC_VOLUME, self.music_volume + delta))
 		if self.has_music():
-			pygame.mixer.music.set_volume(self.music_volume / 100)
+			pygame.mixer.music.set_volume(self.music_volume / MAX_MUSIC_VOLUME)
 
 
 	def response_time_stats(self):
@@ -827,8 +848,8 @@ class Aranea:
 			# Borders
 			bcp = ccp(CCLR_GRAY, CCLR_BLACK)
 
-			caddstr(0, 0, "╭", bcp)
-			caddstr(0, curses.COLS - 1, "╮", bcp)
+			caddstr(0, 0, "┌", bcp)
+			caddstr(0, curses.COLS - 1, "┐", bcp)
 			draw_hline(scr, 0, 1, curses.COLS - 2, bcp)
 
 			title_col_start = (curses.COLS - len(APP_NAME) - 2) >> 1
@@ -872,7 +893,7 @@ class Aranea:
 
 			caddstr(headers_row - 1, curses.COLS - 1, "┤", bcp)
 			draw_vline(scr, curses.COLS - 1, headers_row, headers_row, bcp)
-			caddstr(headers_row + 1, curses.COLS - 1, "┤" if self.show_history_distribution else "╯", bcp)
+			caddstr(headers_row + 1, curses.COLS - 1, "┤" if self.show_history_distribution else "┘", bcp)
 
 			nodes_top_row = headers_row + 2
 
@@ -890,7 +911,7 @@ class Aranea:
 
 			caddstr(bottom_border_row, 0, "├", bcp)
 			draw_hline(scr, bottom_border_row, 1, curses.COLS - 1, bcp)
-			caddstr(bottom_border_row, curses.COLS - 1, "┤" if self.show_history_distribution else "╮", bcp)
+			caddstr(bottom_border_row, curses.COLS - 1, "┤" if self.show_history_distribution else "┐", bcp)
 
 			caddstr(bottom_border_row, NODE_COL_START - 1, "┴", bcp)
 			caddstr(bottom_border_row, response_col_start - 1, "┴", bcp)
@@ -902,9 +923,9 @@ class Aranea:
 			draw_vline(scr, 0, bottom_border_row + 1, curses.LINES - HELP_ROW_HEIGHT - 2, bcp)
 			draw_vline(scr, curses.COLS - 1, bottom_border_row + 1, curses.LINES - HELP_ROW_HEIGHT - 2, bcp)
 
-			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, 0, "╰", bcp)
+			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, 0, "└", bcp)
 			draw_hline(scr, curses.LINES - HELP_ROW_HEIGHT - 1, 1, curses.COLS - 2, bcp)
-			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, curses.COLS - 1, "╯", bcp)
+			caddstr(curses.LINES - HELP_ROW_HEIGHT - 1, curses.COLS - 1, "┘", bcp)
 
 			# Title
 			caddstr(0, title_col_start, " " + APP_NAME + " ", ccp(CCLR_BLACK, CCLR_WHITE))
@@ -953,7 +974,8 @@ class Aranea:
 						RespTimeStatsMode.DELTA : RESPONSETIME_DELTA_HEADER,
 						RespTimeStatsMode.AVG : RESPONSETIME_AVG_HEADER,
 						RespTimeStatsMode.STDDEV: RESPONSETIME_STDDEV_HEADER,
-						RespTimeStatsMode.MAX : RESPONSETIME_HEADER.upper()
+						RespTimeStatsMode.MAX : RESPONSETIME_HEADER.upper(),
+						RespTimeStatsMode.MIN : RESPONSETIME_HEADER.lower()
 					}[self.resptime_stats_mode],
 					headers_cp
 				)
@@ -1013,8 +1035,11 @@ class Aranea:
 						if node.response_times_num > 1:
 							resptime_str = f"{int(round(node.resptime_stddev()))}"
 					elif self.resptime_stats_mode == RespTimeStatsMode.MAX:
-						if node.peak_response_time >= 0:
-							resptime_str = f"{node.peak_response_time}"
+						if node.max_response_time > -1:
+							resptime_str = f"{node.max_response_time}"
+					elif self.resptime_stats_mode == RespTimeStatsMode.MIN:
+						if node.min_response_time < 0xFFFFFFFF:
+							resptime_str = f"{node.min_response_time}"
 					if resptime_str is not None:
 						monoton_indent = 0
 						if monotonicity_char is not None:
@@ -1224,11 +1249,13 @@ class Aranea:
 				self.response_data = 1 + ch - ord('1')
 			elif ch in [ord('r'), ord('R')]:
 				self.response_data = 0
-				self.resptime_stats_mode = { RespTimeStatsMode.NONE : RespTimeStatsMode.DELTA,
+				self.resptime_stats_mode = {
+					RespTimeStatsMode.NONE : RespTimeStatsMode.DELTA,
 					RespTimeStatsMode.DELTA : RespTimeStatsMode.AVG,
 					RespTimeStatsMode.AVG : RespTimeStatsMode.STDDEV,
 					RespTimeStatsMode.STDDEV : RespTimeStatsMode.MAX,
-					RespTimeStatsMode.MAX : RespTimeStatsMode.NONE
+					RespTimeStatsMode.MAX : RespTimeStatsMode.MIN,
+					RespTimeStatsMode.MIN : RespTimeStatsMode.NONE
 				}[self.resptime_stats_mode]
 			elif ch in [ord('l'), ord('L')]:
 				self.duration_stats_mode = { DurationStatsMode.NONE : DurationStatsMode.CONN_MAX,
@@ -1275,9 +1302,9 @@ class Aranea:
 			elif ch == curses.KEY_RIGHT:
 				self.change_music_volume(1)
 			elif ch == curses.KEY_SLEFT:
-				self.change_music_volume(-10)
+				self.change_music_volume(-8)
 			elif ch == curses.KEY_SRIGHT:
-				self.change_music_volume(10)	
+				self.change_music_volume(8)	
 
 			time.sleep(1.0 / self.idlerate)
 

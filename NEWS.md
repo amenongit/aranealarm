@@ -1,3 +1,17 @@
+Version 1.0.10 (2022.09.05)
+---------------------------
+
+* Parsing of "ping" output handles correctly 2 localisations in addition to English default, and output codepage can be configured in aranealarm.json
+
+* Checkrate can be specified in aranealarm.json
+
+* Added minimum response time to node's statistics
+
+* 128 music volume levels instead of 100
+
+* Rolled back to right corners from round ones because the latter are absent in some console fonts
+
+
 Version 1.0.8 (2022.06.05)
 --------------------------
 
