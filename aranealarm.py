@@ -67,7 +67,7 @@ import time
 
 
 APP_NAME = "Aranealarm"
-APP_VER = "v1.0.10 (2022.09.05)"
+APP_VER = "v1.0.12 (2022.12.26)"
 APP_LINK = "github.com/amenongit/aranealarm"
 APP_COPYR_PART1 = "© 2022 Ame"
 APP_COPYR_PART2 = "▄▄▄"
@@ -93,6 +93,7 @@ DEFAULT_STDOUT_CODEPAGE = "cp866"
 DEFAULT_CHECKRATE = 0.25
 DEFAULT_FRAMERATE = 30.0
 DEFAULT_BLINKRATE = 4.0
+DEFAULT_TITLERATE = 0.03125
 DEFAULT_IDLERATE = 100.0 # main loops idle for 1/idlerate seconds to avoid CPU overusage => overheat...
 
 DEFAULT_HUSH_INTERVAL = 30 # sec
@@ -369,21 +370,19 @@ class Node:
 				self.issues += 1
 			self.connected = connected
 
-		self.history_past_num = min(HISTORY_SIZE, self.history_past_num + 1)
-		curr_rec = self.history[self.history_pos]
-		if curr_rec is not None:
-			if (not curr_rec) and (self.connected):
-				self.history_conn_num += 1
-			elif curr_rec and (not self.connected):
-				self.history_conn_num -= 1
-		else:
-			if self.connected:
-				self.history_conn_num += 1
+		self.history_past_num += 1
+		if self.connected:
+			self.history_conn_num += 1
+				
 		self.history[self.history_pos]  = self.connected
 
 
 	def update_history_pos(self):
 		self.history_pos = (self.history_pos + 1) & HISTORY_SIZE_BINMASK
+
+		
+	def clear_history_rec(self):
+		self.history[self.history_pos] = None
 
 
 	def update_peak_durations(self):
@@ -433,7 +432,7 @@ class IPNode(Node):
 		t_start = time.time()
 		for _ in range(self.attempts):
 			ping_run = subprocess.run(ping_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			connected = (ping_run.returncode == 0) and (b"unreachable" not in ping_run.stdout) and ("недостижим".encode("cp866") not in ping_run.stdout)
+			connected = (ping_run.returncode == 0) and (b"unreachable" not in ping_run.stdout) and ("недоступен".encode(self.stdout_codepage) not in ping_run.stdout) and ("недоступний".encode(self.stdout_codepage) not in ping_run.stdout)
 			if connected:
 				ping_out_str_split = ping_run.stdout.decode(self.stdout_codepage).split()
 				for s in ping_out_str_split:
@@ -479,10 +478,11 @@ class LogEntry:
 
 
 class Aranea:
-	def __init__(self, checkrate=DEFAULT_CHECKRATE, framerate=DEFAULT_FRAMERATE, blinkrate=DEFAULT_BLINKRATE, idlerate=DEFAULT_IDLERATE):
+	def __init__(self, checkrate=DEFAULT_CHECKRATE, framerate=DEFAULT_FRAMERATE, blinkrate=DEFAULT_BLINKRATE, titlerate=DEFAULT_TITLERATE, idlerate=DEFAULT_IDLERATE):
 		self.checkrate = checkrate
 		self.framerate = framerate
 		self.blinkrate = blinkrate
+		self.titlerate = titlerate
 		self.idlerate = idlerate
 		
 		self.stdout_codepage = DEFAULT_STDOUT_CODEPAGE
@@ -682,6 +682,7 @@ class Aranea:
 				self.update_log()
 				for node in self.nodes:
 					node.update_history_pos()
+					node.clear_history_rec() # clear history if overwriting ring buffer
 				if self.behind > 0:
 					self.behind += 1
 				self.last_last_respondents = self.last_respondents.copy()
@@ -852,7 +853,9 @@ class Aranea:
 			caddstr(0, curses.COLS - 1, "┐", bcp)
 			draw_hline(scr, 0, 1, curses.COLS - 2, bcp)
 
-			title_col_start = (curses.COLS - len(APP_NAME) - 2) >> 1
+			# title_col_start = (curses.COLS - len(APP_NAME) - 2) >> 1
+			title_col_start = int(2 + 0.5 * (1.0 + math.sin(2.0 * math.pi * t * self.titlerate)) * (curses.COLS - len(APP_NAME) - 5)) # oscillation
+			
 			caddstr(0, title_col_start - 1, "┤", bcp)
 			caddstr(0, title_col_start + len(APP_NAME) + 2, "├", bcp)
 

@@ -1,3 +1,13 @@
+Version 1.0.12 (2022.12.26)
+----------------------------
+
+* Fixed translation of "unreachable" (node) to parse ping stdout correctly
+
+* Before check, node's history record is cleared from result of previous pass over history ring buffer
+
+* Added horizontal oscillation of title as visual clue that system has not hung
+
+
 Version 1.0.10 (2022.09.05)
 ---------------------------
 
