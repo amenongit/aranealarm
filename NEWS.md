@@ -1,3 +1,13 @@
+Version 1.1.0 (2023.03.15)
+----------------------------
+
+* Added adjustable delay of alarm speech to suppress speech in case of frequent short disconnections 
+
+* Remapped some switching keys: D for speech delay, H for history mode, I for speech interval
+
+* Renamed "hush" to "interval" to make its purpose clearer
+
+
 Version 1.0.12 (2022.12.26)
 ----------------------------
 

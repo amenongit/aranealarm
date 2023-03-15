@@ -14,7 +14,7 @@ Configuration is done by means of JSONs.
 
 https://github.com/amenongit/aranealarm
 
-Copyright (c) 2022 Ame🇺🇦Non <amenonbox@gmail.com>
+Copyright (c) 2022-2023 Ame🇺🇦Non <amenonbox@gmail.com>
 
 Aranealarm is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -67,9 +67,9 @@ import time
 
 
 APP_NAME = "Aranealarm"
-APP_VER = "v1.0.12 (2022.12.26)"
+APP_VER = "v1.1.0 (2023.03.15)"
 APP_LINK = "github.com/amenongit/aranealarm"
-APP_COPYR_PART1 = "© 2022 Ame"
+APP_COPYR_PART1 = "© 2022-2023 Ame"
 APP_COPYR_PART2 = "▄▄▄"
 APP_COPYR_PART3 = "Non"
 
@@ -96,7 +96,8 @@ DEFAULT_BLINKRATE = 4.0
 DEFAULT_TITLERATE = 0.03125
 DEFAULT_IDLERATE = 100.0 # main loops idle for 1/idlerate seconds to avoid CPU overusage => overheat...
 
-DEFAULT_HUSH_INTERVAL = 30 # sec
+DEFAULT_SPEECH_DELAY = 12 # sec
+DEFAULT_SPEECH_INTERVAL = 30 # sec
 
 DEFAULT_ALARM_ROW_HEIGHT = 2 # must be >= 2
 
@@ -105,7 +106,8 @@ QUIET_CAPTION = "Q U I E T"
 DISCONNECT_CAPTION = "disconnect"
 DISCONNECTS_CAPTION = "disconnects"
 DURATION_CAPTION = "LASTS FOR"
-HUSHED_CAPTION = "HUSH"
+INTERVALED_CAPTION = "Interval"
+DELAYED_CAPTION = "Delay"
 BEHIND_CAPTION = "Behind"
 
 ALARM_SPEECH = "Alarm"
@@ -205,7 +207,6 @@ else:
 class VoiceQueueMsg(Enum):
 	DISCONNECTS_NUM = auto()
 	SPEAK = auto()
-	HUSH = auto()
 	QUIT = auto()
 
 
@@ -484,7 +485,7 @@ class Aranea:
 		self.blinkrate = blinkrate
 		self.titlerate = titlerate
 		self.idlerate = idlerate
-		
+
 		self.stdout_codepage = DEFAULT_STDOUT_CODEPAGE
 
 		self.nodes = []
@@ -495,8 +496,11 @@ class Aranea:
 		self.last_disconn_nodes_set = set()
 		self.t_last_alarm_state_change = 0
 
-		self.hushed = False
-		self.hush_interval = DEFAULT_HUSH_INTERVAL
+		self.delayed = False
+		self.speech_delay = DEFAULT_SPEECH_DELAY
+		
+		self.intervaled = False
+		self.speech_interval = DEFAULT_SPEECH_INTERVAL
 
 		self.voice_queue = Queue()
 
@@ -544,7 +548,6 @@ class Aranea:
 		speak_engine = pyttsx3.init()
 		disconnects_num = 0
 		t_last_speech = 0
-		speech_interval = 0
 		quit = False
 		while not quit:
 			while not self.voice_queue.empty():
@@ -557,14 +560,15 @@ class Aranea:
 				elif msg[0] == VoiceQueueMsg.SPEAK:
 					speak_engine.say(msg[1])
 					t_last_speech = 0
-				elif msg[0] == VoiceQueueMsg.HUSH:
-					speech_interval = msg[1]
 				elif msg[0] == VoiceQueueMsg.QUIT:
 					quit = True
 				else:
 					raise SystemError("Unknown message: \"" + str(msg) + "\"")
 			t = time.time()
-			if (not quit) and (disconnects_num > 0) and (t - t_last_speech > speech_interval):
+			if (not quit)\
+				and (disconnects_num > 0)\
+				and ((self.intervaled and (t - t_last_speech > self.speech_interval)) or (not self.intervaled))\
+				and ((self.delayed and (t - self.t_last_alarm_state_change > self.speech_delay)) or (not self.delayed)):
 					speak_engine.say(f"{ALARM_SPEECH}: {disconnects_num} {DISCONNECTS_SPEECH if disconnects_num > 1 else DISCONNECT_SPEECH}")
 					speak_engine.runAndWait()
 					t_last_speech = t
@@ -627,7 +631,8 @@ class Aranea:
 				
 		self.alarm_row_height = max(2, config_descr.get("alarm_row_height", DEFAULT_ALARM_ROW_HEIGHT))
 
-		self.hush_interval = max(1, config_descr.get("hush_interval", DEFAULT_HUSH_INTERVAL))
+		self.speech_delay = max(1, config_descr.get("speech_delay", DEFAULT_SPEECH_DELAY))
+		self.speech_interval = max(1, config_descr.get("speech_interval", DEFAULT_SPEECH_INTERVAL))
 
 		music_filepaths_descr = config_descr.get("music", None)
 		if music_filepaths_descr is not None:
@@ -701,14 +706,15 @@ class Aranea:
 	def sync_alarm(self):
 		disconn_nodes_set = self.disconn_nodes_set()
 		if disconn_nodes_set != self.last_disconn_nodes_set: # change
+			disconnects = len(disconn_nodes_set)
+			t = int(time.time())
+			if (self.last_disconnects > 0) != (disconnects > 0):
+				self.t_last_alarm_state_change = t
 			new_disconn_set = disconn_nodes_set - self.last_disconn_nodes_set # may be empty
+			self.last_disconn_nodes_set = disconn_nodes_set.copy()
+			self.last_disconnects = disconnects
 			for i in new_disconn_set:
 				self.voice_queue.put([VoiceQueueMsg.SPEAK, self.nodes[i].speech_name + " " + DISCONNECT_SPEECH])
-			self.last_disconn_nodes_set = disconn_nodes_set.copy()
-			disconnects = len(disconn_nodes_set)
-			if (self.last_disconnects > 0) != (disconnects > 0):
-				self.t_last_alarm_state_change = int(time.time())
-			self.last_disconnects = disconnects
 			self.voice_queue.put([VoiceQueueMsg.DISCONNECTS_NUM, self.last_disconnects])
 			if self.has_music():
 				if self.last_disconnects > 0:
@@ -720,15 +726,17 @@ class Aranea:
 						self.music_paused = False
 						pygame.mixer.music.unpause()
 
-
-	def set_hush(self, hushed, duration=None):
-		self.hushed = hushed
+						
+	def set_delay(self, delayed, duration=None):
+		self.delayed = delayed
 		if duration is not None:
-			self.hush_interval = duration
-		if self.hushed:
-			self.voice_queue.put([VoiceQueueMsg.HUSH, self.hush_interval])
-		else:
-			self.voice_queue.put([VoiceQueueMsg.HUSH, 0])
+			self.speech_delay = duration
+
+
+	def set_interval(self, intervaled, duration=None):
+		self.intervaled = intervaled
+		if duration is not None:
+			self.speech_interval = duration
 
 
 	def sync_music(self, force_next=False):
@@ -958,12 +966,19 @@ class Aranea:
 			mins, secs = secs // 60, secs % 60
 			caddstr(alarm_row, 1, DURATION_CAPTION, ccp(alarm_fg, alarm_bg))
 			caddstr(alarm_row + 1, 1, f"{hours:03}:{mins:02}:{secs:02}", ccp(alarm_fg, alarm_bg))
-			# Hush
-			if self.hushed:
-				caddstr(alarm_row, curses.COLS - 1 - len(HUSHED_CAPTION), HUSHED_CAPTION, ccp(alarm_fg, alarm_bg))
-				hush_interval_caption = f"{self.hush_interval} s"
-				caddstr(alarm_row + 1, curses.COLS - 1 - len(hush_interval_caption), hush_interval_caption, ccp(alarm_fg, alarm_bg))
-
+			# Delay
+			if self.delayed:
+				delay_str = DELAYED_CAPTION + f" {self.speech_delay}"
+				if self.last_disconnects > 0:
+					delay_left = self.t_last_alarm_state_change + self.speech_delay - int(t)
+					if delay_left > 0:
+						delay_str += f" ({delay_left} left)"
+				caddstr(alarm_row, curses.COLS - 1 - len(delay_str), delay_str, ccp(alarm_fg, alarm_bg))
+			# Interval
+			if self.intervaled:
+				interval_str = INTERVALED_CAPTION + f" {self.speech_interval}"
+				caddstr(alarm_row + 1, curses.COLS - 1 - len(interval_str), interval_str, ccp(alarm_fg, alarm_bg))
+				
 			# Headers
 			headers_cp = ccp(CCLR_GRAY)
 			caddstr(headers_row, NUMBER_COL_START, NUMBER_HEADER, headers_cp)
@@ -1155,9 +1170,8 @@ class Aranea:
 			caddstr("L", help_bright_cp)
 			caddstr("asting time stats|", help_dark_cp)
 
-			caddstr("history ", help_dark_cp)
-			caddstr("D", help_bright_cp)
-			caddstr("istribution|", help_dark_cp)
+			caddstr("H", help_bright_cp)
+			caddstr("istory-distribution|", help_dark_cp)
 
 			caddstr("</>", help_bright_cp)
 			caddstr(":prev/next disconnect|", help_dark_cp)
@@ -1167,27 +1181,32 @@ class Aranea:
 			caddstr("uit|", help_dark_cp)
 
 			caddstr("M", help_bright_cp)
-			caddstr("ap <-> log|", help_dark_cp)
+			caddstr("ap<—>log|", help_dark_cp)
 
 			caddstr("W", help_bright_cp)
 			caddstr("rite log|", help_dark_cp)
 
-			caddstr("H", help_bright_cp)
-			caddstr("ush (", help_dark_cp)
+			caddstr("(/)", help_bright_cp)
+			caddstr(f":speech ", help_dark_cp)
+			caddstr("D", help_bright_cp)
+			caddstr("elay|", help_dark_cp)
+			
 			caddstr("[/]/{/}", help_bright_cp)
-			caddstr(":interval)|", help_dark_cp)
-
+			caddstr(":speech ", help_dark_cp)
+			caddstr("I", help_bright_cp)
+			caddstr("nterval|", help_dark_cp)
+			
 			if self.has_music():
 				caddstr("N", help_bright_cp)
 				caddstr("ext music (", help_dark_cp)
 				caddstr("S", help_bright_cp)
 				caddstr("huffle " + ("√" if self.music_shuffle else "×") + ")|", help_dark_cp)
 				caddstr("←/→", help_bright_cp)
-				caddstr(f":music volume {self.music_volume:03}|", help_dark_cp)
+				caddstr(f":music vol {self.music_volume}|", help_dark_cp)
 
 			# Version & link & copyright
-			caddstr(curses.LINES - HELP_ROW_HEIGHT + 0, curses.COLS - 1 - len(APP_VER), APP_VER, ccp(CCLR_DARKGRAY))
-			caddstr(curses.LINES - HELP_ROW_HEIGHT + 1, curses.COLS - 1 - len(APP_LINK), APP_LINK, ccp(CCLR_DARKGRAY))
+			caddstr(curses.LINES - HELP_ROW_HEIGHT + 0, curses.COLS - 1 - len(APP_LINK), APP_LINK, ccp(CCLR_DARKGRAY))
+			caddstr(curses.LINES - HELP_ROW_HEIGHT + 1, curses.COLS - 1 - len(APP_VER), APP_VER, ccp(CCLR_DARKGRAY))
 			caddstr(curses.LINES - HELP_ROW_HEIGHT + 2, curses.COLS - 1 - (len(APP_COPYR_PART1) + len(APP_COPYR_PART2) + len(APP_COPYR_PART3)), APP_COPYR_PART1, ccp(CCLR_DARKGRAY))
 			caddstr(APP_COPYR_PART2, ccp(CCLR_DARKYELLOW, CCLR_DARKBLUE))
 			caddstr(APP_COPYR_PART3, ccp(CCLR_DARKGRAY))
@@ -1265,7 +1284,7 @@ class Aranea:
 					DurationStatsMode.CONN_MAX : DurationStatsMode.DISCONN_MAX,
 					DurationStatsMode.DISCONN_MAX : DurationStatsMode.NONE
 				}[self.duration_stats_mode]
-			elif ch in [ord('d'), ord('D')]:
+			elif ch in [ord('h'), ord('H')]:
 				self.show_history_distribution = not self.show_history_distribution
 			elif ch == ord('<'):
 				new_page_start = self.page_start - 1
@@ -1286,16 +1305,22 @@ class Aranea:
 				self.show_map = not self.show_map			
 			elif ch in [ord('w'), ord('W')]:
 				self.write_log(DEFAULT_LOG_FILENAME)
-			elif ch in [ord('h'), ord('H')]:
-				self.set_hush(not self.hushed)
+			elif ch in [ord('d'), ord('D')]:
+				self.set_delay(not self.delayed)
+			elif ch == ord('('):
+				self.set_delay(True, max(1, self.speech_delay - 1))
+			elif ch == ord(')'):
+				self.set_delay(True, self.speech_delay + 1)
+			elif ch in [ord('i'), ord('I')]:
+				self.set_interval(not self.intervaled)
 			elif ch == ord('['):
-				self.set_hush(True, max(1, self.hush_interval - 1))
+				self.set_interval(True, max(1, self.speech_interval - 1))
 			elif ch == ord(']'):
-				self.set_hush(True, self.hush_interval + 1)
+				self.set_interval(True, self.speech_interval + 1)
 			elif ch == ord('{'):
-				self.set_hush(True, max(1, self.hush_interval - 10))
+				self.set_interval(True, max(1, self.speech_interval - 10))
 			elif ch == ord('}'):
-				self.set_hush(True, self.hush_interval + 10)
+				self.set_interval(True, self.speech_interval + 10)
 			elif ch in [ord('n'), ord('N')]:
 				self.sync_music(True)
 			elif ch in [ord('s'), ord('S')]:
