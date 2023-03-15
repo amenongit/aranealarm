@@ -7,6 +7,8 @@ Version 1.1.0 (2023.03.15)
 
 * Renamed "hush" to "interval" to make its purpose clearer
 
+* Added release with binaries for 64-bit Ubuntu and 32/64-bit Windows
+
 
 Version 1.0.12 (2022.12.26)
 ----------------------------
