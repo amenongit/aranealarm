@@ -1,3 +1,11 @@
+Version 1.1.2 (2023.05.27)
+----------------------------
+
+* Added speech to transition from ">0 disconnects" to "0 disconnects" to place more perceptible mark on such instant
+
+* Year's passed by...
+
+
 Version 1.1.0 (2023.03.15)
 ----------------------------
 

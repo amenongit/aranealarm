@@ -67,7 +67,7 @@ import time
 
 
 APP_NAME = "Aranealarm"
-APP_VER = "v1.1.0 (2023.03.15)"
+APP_VER = "v1.1.2 (2023.05.27)"
 APP_LINK = "github.com/amenongit/aranealarm"
 APP_COPYR_PART1 = "© 2022-2023 Ame"
 APP_COPYR_PART2 = "▄▄▄"
@@ -113,6 +113,8 @@ BEHIND_CAPTION = "Behind"
 ALARM_SPEECH = "Alarm"
 DISCONNECT_SPEECH = "disconnect"
 DISCONNECTS_SPEECH = "disconnects"
+QUIET_SPEECH = "Quiet"
+ALL_CONNECTED_SPEECH = "all connected"
 
 DEFAULT_MUSIC_VOLUME = 16
 MAX_MUSIC_VOLUME = 128
@@ -548,6 +550,7 @@ class Aranea:
 		speak_engine = pyttsx3.init()
 		disconnects_num = 0
 		t_last_speech = 0
+		switched_to_quiet = True
 		quit = False
 		while not quit:
 			while not self.voice_queue.empty():
@@ -556,7 +559,7 @@ class Aranea:
 					disconnects_num = msg[1]
 					t_last_speech = 0
 					if disconnects_num == 0:
-						speak_engine.stop()
+						speak_engine.stop() # to clear queue of "SPEAK" speeches
 				elif msg[0] == VoiceQueueMsg.SPEAK:
 					speak_engine.say(msg[1])
 					t_last_speech = 0
@@ -565,13 +568,19 @@ class Aranea:
 				else:
 					raise SystemError("Unknown message: \"" + str(msg) + "\"")
 			t = time.time()
-			if (not quit)\
-				and (disconnects_num > 0)\
-				and ((self.intervaled and (t - t_last_speech > self.speech_interval)) or (not self.intervaled))\
-				and ((self.delayed and (t - self.t_last_alarm_state_change > self.speech_delay)) or (not self.delayed)):
-					speak_engine.say(f"{ALARM_SPEECH}: {disconnects_num} {DISCONNECTS_SPEECH if disconnects_num > 1 else DISCONNECT_SPEECH}")
-					speak_engine.runAndWait()
-					t_last_speech = t
+			if not quit:
+				if disconnects_num > 0:
+					if ((self.intervaled and (t - t_last_speech > self.speech_interval)) or (not self.intervaled))\
+					and ((self.delayed and (t - self.t_last_alarm_state_change > self.speech_delay)) or (not self.delayed)):
+						speak_engine.say(f"{ALARM_SPEECH}! {disconnects_num} {DISCONNECTS_SPEECH if disconnects_num > 1 else DISCONNECT_SPEECH}")
+						speak_engine.runAndWait()
+						t_last_speech = t
+						switched_to_quiet = False
+				else:
+					if not switched_to_quiet:
+						speak_engine.say(f"{QUIET_SPEECH}: {ALL_CONNECTED_SPEECH}")
+						speak_engine.runAndWait()
+						switched_to_quiet = True
 			time.sleep(1.0 / self.idlerate)
 
 
